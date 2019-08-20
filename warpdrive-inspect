@@ -1,0 +1,77 @@
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/transwarp/warpdrive/api"
+	"github.com/transwarp/warpdrive/clientapi"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/kubernetes/pkg/kubectl/plugins/creatclient"
+)
+
+func main() {
+	k8sClient := creatclient.CreateK8sClient()
+	if len(os.Args) != 2 {
+		fmt.Println("Warning: You need and only need to provide one pv's name ")
+		return
+	}
+	pvName := os.Args[1]
+	pvInfo, err := inspectPV(k8sClient, pvName)
+	if err != nil {
+		return
+	}
+	fmt.Println(pvInfo)
+
+}
+
+func inspectPV(k8sClient *kubernetes.Clientset, pvName string) (pvInfo string, err error) {
+	//Get pv location
+	nodeName, err := getSinglePvLocationInfo(k8sClient, pvName)
+	if err != nil {
+		fmt.Printf("%v\n", err)
+		return
+	}
+
+	//Creat new warpDriveclient
+	warpDriveclient, err := clientapi.NewWarpDriveClient(nodeName+":8808", "kubectl plugin")
+	if err != nil {
+		fmt.Printf("Creat new client err :%v\n", err)
+		return
+	}
+
+	VolumeInspectResponse, err := warpDriveclient.InspectDevice(pvName)
+	if err != nil {
+		fmt.Printf("InspectDevice pv err :%v\n", err)
+		return
+	}
+
+	resourceOutput, err := api.ResponseOutput(VolumeInspectResponse)
+	if err != nil {
+		fmt.Printf("Output info  err :%v\n", err)
+		return
+	}
+	pvInfo = string(resourceOutput)
+	return
+
+}
+
+func getSinglePvLocationInfo(k8sClient *kubernetes.Clientset, pvname string) (nodeName string, err error) {
+	var location string
+	pv, err := k8sClient.CoreV1().PersistentVolumes().Get(pvname, metav1.GetOptions{})
+	if err != nil {
+		err = fmt.Errorf("Get the info of persistentvolumes err :%v\n", err)
+		return
+	}
+	annotationMap := pv.ObjectMeta.Annotations
+	value, ok := annotationMap["transwarp.io/tosdiskLocation"]
+	if ok && len(value) > 0 {
+		location = value
+	} else {
+		err = fmt.Errorf("%s", "Error: Can't find the pv location")
+		return
+	}
+	nodeName = location
+	return
+}

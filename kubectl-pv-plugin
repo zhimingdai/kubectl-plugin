@@ -1,0 +1,183 @@
+package main
+
+import (
+	"fmt"
+	"math"
+	"os"
+	"time"
+
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+
+	"k8s.io/kubernetes/pkg/kubectl/plugins/creatclient"
+)
+
+//PersistentVolumesInfo defines the info we want to output.
+type PersistentVolumesInfo struct {
+	name          string
+	capacity      string
+	reclaimPolicy string
+	status        string
+	pvClaimRefUID string
+	storageClass  string
+	age           string
+	location      string
+	subPool       string
+}
+
+func main() {
+	k8sClient := creatclient.CreateK8sClient()
+	//Check for the args,and decide to exec which function.
+	if len(os.Args) > 1 {
+		if len(os.Args) != 2 {
+			fmt.Printf("%s\n", "Warning: You need and only need to provide one pv's name")
+			return
+		}
+		getSinglePersistentVolumesInfo(k8sClient, os.Args[1])
+
+	} else {
+		listAllPersistentVolumesInfo(k8sClient)
+	}
+}
+
+//createK8sClient creat a clientset base on the kubeconfig in our cluster.
+
+//Check for kubeconfig in env,if not get it from defaultpath
+
+//listAllPersistentVolumesInfo use the clientset get the info of the whole pv in our cluster.
+func listAllPersistentVolumesInfo(k8sClient *kubernetes.Clientset) {
+	pvList, err := k8sClient.CoreV1().PersistentVolumes().List(metav1.ListOptions{})
+	if err != nil {
+		fmt.Printf("List all pv err: %v\n", err)
+		return
+	}
+	var allPvInfo []PersistentVolumesInfo
+	var maxPvName int
+	var maxPvClaim int
+	var maxLocation int
+	var maxsubPool int
+	for _, pv := range pvList.Items {
+		var PvInfo PersistentVolumesInfo
+		annotationMap := pv.ObjectMeta.Annotations
+		if value, ok := annotationMap["transwarp.io/subpool"]; ok {
+			PvInfo.subPool = value
+		} else {
+			PvInfo.subPool = "       "
+		}
+		if value, ok := annotationMap["transwarp.io/tosdiskLocation"]; ok {
+			PvInfo.location = value
+		} else {
+			PvInfo.location = "        "
+		}
+		PvInfo.name = pv.ObjectMeta.Name
+		pvCap := pv.Spec.Capacity[v1.ResourceStorage]
+		PvInfo.capacity = pvCap.String()
+		PvInfo.reclaimPolicy = string(pv.Spec.PersistentVolumeReclaimPolicy)
+		PvInfo.status = string(pv.Status.Phase)
+		pvClaimRefUID := ""
+		if pv.Spec.ClaimRef != nil {
+			pvClaimRefUID += pv.Spec.ClaimRef.Namespace
+			pvClaimRefUID += "/"
+			pvClaimRefUID += pv.Spec.ClaimRef.Name
+		}
+		PvInfo.pvClaimRefUID = pvClaimRefUID
+		PvInfo.storageClass = pv.Spec.StorageClassName
+		PvInfo.age = translateTimestamp(pv.CreationTimestamp)
+		maxPvName = int(math.Max(float64(len(PvInfo.name)), float64(maxPvName)))
+		maxPvClaim = int(math.Max(float64(len(PvInfo.pvClaimRefUID)), float64(maxPvClaim)))
+		maxLocation = int(math.Max(float64(len(PvInfo.location)), float64(maxLocation)))
+		maxsubPool = int(math.Max(float64(len(PvInfo.subPool)), float64(maxsubPool)))
+		allPvInfo = append(allPvInfo, PvInfo)
+	}
+	var formatArgs []int
+	formatArgs = append(formatArgs, maxPvName, maxPvClaim, maxLocation, maxsubPool)
+	printPvInfoName(formatArgs)
+	for _, pvInfo := range allPvInfo {
+		prinPvInfo(pvInfo, formatArgs)
+	}
+
+}
+
+//getSinglePersistentVolumesInfo get the info of the pv base on the pvname we provide.
+func getSinglePersistentVolumesInfo(k8sClient *kubernetes.Clientset, pvname string) {
+	pv, err := k8sClient.CoreV1().PersistentVolumes().Get(pvname, metav1.GetOptions{})
+	if err != nil {
+		fmt.Printf("Get pv info err: %v\n", err)
+		return
+	}
+	var PvInfo PersistentVolumesInfo
+	annotationMap := pv.ObjectMeta.Annotations
+	if value, ok := annotationMap["transwarp.io/subpool"]; ok {
+		PvInfo.subPool = value
+	} else {
+		PvInfo.subPool = "       "
+	}
+	if value, ok := annotationMap["transwarp.io/tosdiskLocation"]; ok {
+		PvInfo.location = value
+	} else {
+		PvInfo.location = "        "
+	}
+	PvInfo.name = pv.ObjectMeta.Name
+	test := pv.Spec.Capacity[v1.ResourceStorage]
+	PvInfo.capacity = test.String()
+	PvInfo.reclaimPolicy = string(pv.Spec.PersistentVolumeReclaimPolicy)
+	PvInfo.status = string(pv.Status.Phase)
+	pvClaimRefUID := ""
+	if pv.Spec.ClaimRef != nil {
+		pvClaimRefUID += pv.Spec.ClaimRef.Namespace
+		pvClaimRefUID += "/"
+		pvClaimRefUID += pv.Spec.ClaimRef.Name
+	}
+	PvInfo.pvClaimRefUID = pvClaimRefUID
+	PvInfo.storageClass = pv.Spec.StorageClassName
+	PvInfo.age = translateTimestamp(pv.CreationTimestamp)
+	var formatArgs []int
+	formatArgs = append(formatArgs, len(PvInfo.name), len(PvInfo.pvClaimRefUID), len(PvInfo.location), len(PvInfo.subPool))
+	printPvInfoName(formatArgs)
+	prinPvInfo(PvInfo, formatArgs)
+	return
+}
+
+//Get the age of pv.
+func translateTimestamp(timestamp metav1.Time) string {
+	if timestamp.IsZero() {
+		return "<unknown>"
+	}
+	temp := ShortHumanDuration1(time.Now().Sub(timestamp.Time))
+	return temp
+
+}
+func ShortHumanDuration1(d time.Duration) string {
+	// Allow deviation no more than 2 seconds(excluded) to tolerate machine time
+	// inconsistence, it can be considered as almost now.
+	if seconds := int(d.Seconds()); seconds < -1 {
+		return fmt.Sprintf("<invalid>")
+	} else if seconds < 0 {
+		return fmt.Sprintf("0s")
+	} else if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	} else if minutes := int(d.Minutes()); minutes < 60 {
+		return fmt.Sprintf("%dm", minutes)
+	} else if hours := int(d.Hours()); hours < 24 {
+		return fmt.Sprintf("%dh", hours)
+	} else if hours < 24*365 {
+		return fmt.Sprintf("%dd", hours/24)
+	}
+	return fmt.Sprintf("%dy", int(d.Hours()/24/365))
+}
+
+//Print the info name.
+func printPvInfoName(formatargs []int) {
+	fmt.Printf("%-[1]*s%-11s%-17s%-9s%-[6]*s%-15s%-6s%-[10]*s%-[12]*s", formatargs[0]+3, "NAME", "CAPACITY",
+		"RECLAIM POLICY", "STATUS", formatargs[1]+3, "CLAIM", "STORAGECLASS", "AGE", formatargs[2]+3, "LOCATION", formatargs[3]+3, "SUBPOOL")
+	fmt.Println("")
+}
+
+//Print the info of pv.
+func prinPvInfo(PvInfo PersistentVolumesInfo, formatargs []int) {
+	fmt.Printf("%-[1]*s%-11s%-17s%-9s%-[6]*s%-15s%-6s%-[10]*s%-[12]*s ", formatargs[0]+3, PvInfo.name, PvInfo.capacity,
+		PvInfo.reclaimPolicy, PvInfo.status, formatargs[1]+3, PvInfo.pvClaimRefUID, PvInfo.storageClass, PvInfo.age, formatargs[2]+3,
+		PvInfo.location, formatargs[3]+3, PvInfo.subPool)
+	fmt.Println("")
+}
